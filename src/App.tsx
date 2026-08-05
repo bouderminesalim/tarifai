@@ -26,13 +26,20 @@ const accentMap: Record<string, string> = { air: 'from-sky-500 to-cyan-400', sea
 function formatMoney(value: number, currency = 'USD') {
   return new Intl.NumberFormat('fr-FR', { style: 'currency', currency, maximumFractionDigits: 0 }).format(value || 0);
 }
-
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(path, { headers: { 'Content-Type': 'application/json', ...(options?.headers || {}) }, ...options });
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData?.session?.access_token;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options?.headers as Record<string, string> | undefined),
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(path, { headers, ...options });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || 'Erreur réseau');
   return data as T;
 }
+
 
 function AppShell() {
   const [page, setPage] = useState('Accueil');
