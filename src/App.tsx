@@ -26,6 +26,7 @@ const accentMap: Record<string, string> = { air: 'from-sky-500 to-cyan-400', sea
 function formatMoney(value: number, currency = 'USD') {
   return new Intl.NumberFormat('fr-FR', { style: 'currency', currency, maximumFractionDigits: 0 }).format(value || 0);
 }
+
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const { data: sessionData } = await supabase.auth.getSession();
   const token = sessionData?.session?.access_token;
@@ -39,7 +40,6 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   if (!res.ok) throw new Error(data.error || 'Erreur réseau');
   return data as T;
 }
-
 
 function AppShell() {
   const [page, setPage] = useState('Accueil');
@@ -88,6 +88,7 @@ function AppShell() {
         <Tracking />
         <Docs />
         <Assistant />
+        <ClassificationWizard />
         <Admin />
       </main>
       <Footer />
@@ -197,6 +198,143 @@ function Assistant() {
   const [question, setQuestion] = useState('Quel code SH pour des panneaux solaires ?'); const [messages, setMessages] = useState<Array<{ id: number; question: string; answer: string }>>([]); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const ask = async () => { setError(''); if (!question.trim()) { setError('Veuillez saisir une question.'); return; } setBusy(true); try { const msg = await api<{ id: number; question: string; answer: string }>('/api/assistant', { method: 'POST', body: JSON.stringify({ question, lang: 'FR' }) }); setMessages([msg, ...messages]); setQuestion(''); } catch (err) { setError((err as Error).message); } finally { setBusy(false); } };
   return <section id="ia" className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8"><SectionTitle icon={<Bot/>} eyebrow="AI customs copilot" title="Assistant IA TarifAI" subtitle="Recommandation de code SH, explication des règles douanières, calculs et réponses contextuelles fondées sur la base métier."/><div className="grid gap-6 lg:grid-cols-[.8fr_1.2fr]"><Card><div className="rounded-3xl bg-gradient-to-br from-slate-950 via-blue-900 to-fuchsia-800 p-5 text-white"><Bot size={42}/><h3 className="mt-4 text-2xl font-black">Posez votre question</h3><p className="mt-2 text-white/70">Exemples: documents pour batterie lithium, CIF Alger, droits TVA textile, restrictions alimentaire.</p></div><textarea value={question} onChange={e => setQuestion(e.target.value)} className="mt-4 min-h-36 w-full rounded-3xl border border-slate-200 bg-slate-50 p-4 outline-none focus:ring-2 focus:ring-fuchsia-500 dark:border-white/10 dark:bg-white/10" />{error && <p className="mt-3 rounded-xl bg-red-50 p-3 text-sm text-red-600 dark:bg-red-500/10">{error}</p>}<button onClick={ask} disabled={busy} className="mt-4 w-full rounded-2xl bg-gradient-to-r from-blue-700 via-fuchsia-600 to-orange-400 px-5 py-4 font-black text-white disabled:opacity-60">{busy ? 'Analyse...' : 'Demander à l’IA'}</button></Card><Card><h3 className="text-xl font-black">Conversation</h3><div className="mt-4 space-y-4">{messages.length === 0 && <div className="rounded-3xl bg-slate-50 p-6 text-slate-500 dark:bg-white/5">Aucune question dans cette session. Les réponses sont générées depuis la base Supabase assistant_knowledge et historisées.</div>}{messages.map(m => <div key={m.id} className="rounded-3xl bg-slate-50 p-5 dark:bg-white/5"><p className="font-black text-blue-600 dark:text-cyan-300">Q: {m.question}</p><p className="mt-3 whitespace-pre-line leading-7">{m.answer}</p></div>)}</div></Card></div></section>;
+}
+
+type RgiStep = 'search' | 'incomplete' | 'composite' | 'specific' | 'essential' | 'result';
+
+function ClassificationWizard() {
+  const [productQuery, setProductQuery] = useState('');
+  const [candidates, setCandidates] = useState<Tariff[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [step, setStep] = useState<RgiStep>('search');
+  const [trail, setTrail] = useState<string[]>([]);
+  const [result, setResult] = useState<Tariff | null>(null);
+  const [essentialInput, setEssentialInput] = useState('');
+
+  const search = async () => {
+    setError('');
+    if (!productQuery.trim()) { setError('Décrivez le produit à classer (matière, fonction, nom usuel...).'); return; }
+    setBusy(true);
+    try {
+      const found = await api<Tariff[]>(`/api/tariffs?q=${encodeURIComponent(productQuery)}`);
+      if (found.length === 0) {
+        setError('Aucun code trouvé pour cette description. Essayez des mots plus généraux (matière, fonction principale).');
+      } else if (found.length > 12) {
+        setError(`${found.length} résultats — trop pour comparer précisément. Précisez avec la matière, la fonction ou un terme plus spécifique.`);
+      } else if (found.length === 1) {
+        setCandidates(found);
+        setResult(found[0]);
+        setTrail(['Une seule position correspond au libellé recherché — retenue directement (Règle 1).']);
+        setStep('result');
+      } else {
+        setCandidates(found);
+        setTrail([]);
+        setStep('incomplete');
+      }
+    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  };
+
+  const answerIncomplete = (isIncomplete: boolean) => {
+    if (isIncomplete) setTrail(t => [...t, "Produit incomplet, non fini, démonté ou non monté : classé comme le produit complet dès lors qu'il en présente déjà les caractéristiques essentielles (Règle 2a)."]);
+    setStep('composite');
+  };
+
+  const answerComposite = (isComposite: boolean) => {
+    setTrail(t => [...t, isComposite
+      ? "Produit mélangé, composite ou vendu en assortiment : classement selon la Règle 3."
+      : "Le libellé de position le plus précis prévaut sur un libellé plus général (Règle 1)."]);
+    setStep('specific');
+  };
+
+  const pickSpecific = (t: Tariff | null) => {
+    if (t) {
+      setResult(t);
+      setTrail(tr => [...tr, `Position la plus spécifique retenue (Règle 3a) : ${t.hs_code} — ${t.description_fr}`]);
+      setStep('result');
+    } else {
+      setStep('essential');
+    }
+  };
+
+  const submitEssential = () => {
+    if (!essentialInput.trim()) return;
+    const needle = essentialInput.toLowerCase();
+    const match = candidates.find(c => c.description_fr.toLowerCase().includes(needle));
+    if (match) {
+      setResult(match);
+      setTrail(t => [...t, `Caractère essentiel identifié ("${essentialInput}") : position retenue selon la Règle 3b — ${match.hs_code} — ${match.description_fr}`]);
+    } else {
+      const fallback = [...candidates].sort((a, b) => b.hs_code.localeCompare(a.hs_code))[0] || null;
+      setResult(fallback);
+      setTrail(t => [...t, fallback
+        ? `Caractère essentiel non déterminant à partir des libellés disponibles : position retenue par défaut, la dernière par ordre de numérotation parmi les candidates (Règle 3c) — ${fallback.hs_code} — ${fallback.description_fr}`
+        : "Aucune position candidate n'a pu être retenue automatiquement — une vérification manuelle est nécessaire."]);
+    }
+    setStep('result');
+  };
+
+  const reset = () => { setStep('search'); setCandidates([]); setResult(null); setTrail([]); setProductQuery(''); setEssentialInput(''); setError(''); };
+
+  return <section id="classement" className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
+    <SectionTitle icon={<ShieldCheck/>} eyebrow="Classement guidé" title="Assistant de classement (Règles Générales d'Interprétation)" subtitle="Un questionnaire pas à pas fondé sur les 6 Règles Générales d'Interprétation du Système Harmonisé — déterministe et traçable, pas une estimation par IA générative."/>
+    <Card>
+      {step === 'search' && <div>
+        <p className="font-black text-lg">Décrivez le produit à classer</p>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Nom usuel, matière principale, fonction. Ex: "table de cuisine en bois", "kit de spaghetti avec sauce et fromage".</p>
+        <textarea value={productQuery} onChange={e => setProductQuery(e.target.value)} className="mt-4 min-h-24 w-full rounded-3xl border border-slate-200 bg-slate-50 p-4 outline-none focus:ring-2 focus:ring-fuchsia-500 dark:border-white/10 dark:bg-white/10" />
+        {error && <p className="mt-3 rounded-xl bg-red-50 p-3 text-sm text-red-600 dark:bg-red-500/10">{error}</p>}
+        <button onClick={search} disabled={busy} className="mt-4 rounded-2xl bg-gradient-to-r from-blue-700 via-fuchsia-600 to-orange-400 px-6 py-3 font-black text-white disabled:opacity-60">{busy ? 'Recherche...' : 'Commencer le classement'}</button>
+      </div>}
+
+      {step === 'incomplete' && <div>
+        <p className="text-sm text-slate-500 dark:text-slate-400">{candidates.length} positions correspondent à « {productQuery} ».</p>
+        <p className="mt-3 font-black text-lg">Le produit est-il incomplet, non fini, présenté démonté ou non monté ?</p>
+        <div className="mt-4 flex gap-3">
+          <button onClick={() => answerIncomplete(true)} className="rounded-2xl bg-slate-950 px-6 py-3 font-black text-white dark:bg-white dark:text-slate-950">Oui</button>
+          <button onClick={() => answerIncomplete(false)} className="rounded-2xl border border-slate-200 px-6 py-3 font-black dark:border-white/10">Non</button>
+        </div>
+      </div>}
+
+      {step === 'composite' && <div>
+        <p className="font-black text-lg">Est-ce un mélange de matières, un assemblage de plusieurs éléments différents, ou un lot/kit vendu ensemble ?</p>
+        <div className="mt-4 flex gap-3">
+          <button onClick={() => answerComposite(true)} className="rounded-2xl bg-slate-950 px-6 py-3 font-black text-white dark:bg-white dark:text-slate-950">Oui</button>
+          <button onClick={() => answerComposite(false)} className="rounded-2xl border border-slate-200 px-6 py-3 font-black dark:border-white/10">Non</button>
+        </div>
+      </div>}
+
+      {step === 'specific' && <div>
+        <p className="font-black text-lg">Choisissez la position dont le libellé décrit le plus précisément votre produit :</p>
+        <div className="mt-4 space-y-2">
+          {candidates.map(c => <button key={c.id} onClick={() => pickSpecific(c)} className="block w-full rounded-2xl border border-slate-200 p-4 text-left hover:border-fuchsia-400 dark:border-white/10"><span className="font-black">{c.hs_code}</span> — {c.description_fr}</button>)}
+          <button onClick={() => pickSpecific(null)} className="mt-2 rounded-2xl border border-dashed border-slate-300 px-6 py-3 font-black text-slate-500 dark:border-white/20">Aucune n'est plus précise qu'une autre</button>
+        </div>
+      </div>}
+
+      {step === 'essential' && <div>
+        <p className="font-black text-lg">Qu'est-ce qui donne à ce produit son caractère essentiel ?</p>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Matière dominante, fonction principale, poids ou valeur prépondérante...</p>
+        <input value={essentialInput} onChange={e => setEssentialInput(e.target.value)} className="mt-4 w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none focus:ring-2 focus:ring-fuchsia-500 dark:border-white/10 dark:bg-white/10" placeholder="Ex: coton, moteur électrique, bois..." />
+        <button onClick={submitEssential} className="mt-4 rounded-2xl bg-gradient-to-r from-blue-700 via-fuchsia-600 to-orange-400 px-6 py-3 font-black text-white">Valider</button>
+      </div>}
+
+      {step === 'result' && <div>
+        {result ? <div className="rounded-3xl bg-gradient-to-br from-slate-950 via-blue-900 to-fuchsia-800 p-6 text-white">
+          <p className="text-sm font-bold text-white/70">Code SH suggéré</p>
+          <p className="mt-1 text-3xl font-black">{result.hs_code}</p>
+          <p className="mt-2 text-white/90">{result.description_fr}</p>
+          <div className="mt-4 flex gap-4 text-sm"><span>Droit de douane : <strong>{Math.round((result.duty_rate || 0) * 100)}%</strong></span><span>TVA : <strong>{Math.round((result.vat_rate || 0) * 100)}%</strong></span></div>
+        </div> : <p className="text-slate-500">Aucune position n'a pu être déterminée automatiquement — une vérification manuelle est nécessaire.</p>}
+        <div className="mt-5">
+          <p className="font-black">Raisonnement appliqué :</p>
+          <ol className="mt-2 space-y-2 text-sm text-slate-600 dark:text-slate-300">{trail.map((s, i) => <li key={i} className="flex gap-2"><span className="font-black text-fuchsia-600">{i + 1}.</span>{s}</li>)}</ol>
+        </div>
+        <div className="mt-5 flex items-start gap-2 rounded-2xl bg-amber-50 p-4 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200"><AlertTriangle size={18} className="mt-0.5 shrink-0"/><p>Suggestion générée automatiquement d'après les Règles Générales d'Interprétation. Elle ne remplace pas une décision de classement officielle — pour tout dossier engageant, faites confirmer ce code via la procédure de renseignement tarifaire de la DGD (modèle D.40).</p></div>
+        <button onClick={reset} className="mt-5 rounded-2xl border border-slate-200 px-6 py-3 font-black dark:border-white/10">Nouveau classement</button>
+      </div>}
+    </Card>
+  </section>;
 }
 
 function Admin() {
