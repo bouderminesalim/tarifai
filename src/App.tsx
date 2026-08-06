@@ -202,18 +202,6 @@ function Assistant() {
 
 const STOPWORDS = new Set(['de','la','le','les','du','des','un','une','et','en','pour','avec','sur','dans','au','aux','ou','par','ce','cette','ces','type','genre']);
 
-async function searchTariffsSmart(query: string): Promise<Tariff[]> {
-  const full = await api<Tariff[]>(`/api/tariffs?q=${encodeURIComponent(query.trim())}`);
-  if (full.length > 0) return full;
-  const words = query.toLowerCase().split(/[^a-zàâçéèêëîïôûùüÿñæœ0-9]+/).filter(w => w.length > 2 && !STOPWORDS.has(w));
-  const uniqueWords = Array.from(new Set(words)).sort((a, b) => b.length - a.length).slice(0, 3);
-  if (uniqueWords.length === 0) return [];
-  const results = await Promise.all(uniqueWords.map(w => api<Tariff[]>(`/api/tariffs?q=${encodeURIComponent(w)}`)));
-  const merged = new Map<number, Tariff>();
-  for (const list of results) for (const t of list) merged.set(t.id, t);
-  return Array.from(merged.values());
-}
-
 type RgiStep = 'search' | 'incomplete' | 'composite' | 'specific' | 'essential' | 'result';
 
 function ClassificationWizard() {
@@ -231,19 +219,30 @@ function ClassificationWizard() {
     if (!productQuery.trim()) { setError('Décrivez le produit à classer (matière, fonction, nom usuel...).'); return; }
     setBusy(true);
     try {
-      const found = await searchTariffsSmart(productQuery);
-      if (found.length === 0) {
+      const words = productQuery.toLowerCase().split(/[^a-zàâçéèêëîïôûùüÿñæœ0-9]+/).filter(w => w.length > 2 && !STOPWORDS.has(w));
+      const uniqueWords = Array.from(new Set(words)).sort((a, b) => b.length - a.length).slice(0, 4);
+      const attempts = [productQuery.trim(), ...uniqueWords];
+
+      let best: Tariff[] | null = null;
+      let bestTerm = '';
+      for (const term of attempts) {
+        const found = await api<Tariff[]>(`/api/tariffs?q=${encodeURIComponent(term)}`);
+        if (found.length >= 1 && found.length <= 12) { best = found; bestTerm = term; break; }
+        if (found.length > 0 && (!best || found.length < best.length)) { best = found; bestTerm = term; }
+      }
+
+      if (!best || best.length === 0) {
         setError('Aucun code trouvé pour cette description. Essayez des mots plus généraux (matière, fonction principale).');
-      } else if (found.length > 12) {
-        setError(`${found.length} résultats — trop pour comparer précisément. Précisez avec la matière, la fonction ou un terme plus spécifique.`);
-      } else if (found.length === 1) {
-        setCandidates(found);
-        setResult(found[0]);
-        setTrail(['Une seule position correspond au libellé recherché — retenue directement (Règle 1).']);
+      } else if (best.length > 12) {
+        setError(`${best.length} résultats pour « ${bestTerm} » — trop pour comparer précisément. Précisez avec la matière, la fonction ou un terme plus spécifique.`);
+      } else if (best.length === 1) {
+        setCandidates(best);
+        setResult(best[0]);
+        setTrail([`Une seule position correspond à « ${bestTerm} » — retenue directement (Règle 1).`]);
         setStep('result');
       } else {
-        setCandidates(found);
-        setTrail([]);
+        setCandidates(best);
+        setTrail(bestTerm === productQuery.trim() ? [] : [`Recherche affinée sur « ${bestTerm} » (${best.length} positions candidates).`]);
         setStep('incomplete');
       }
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
