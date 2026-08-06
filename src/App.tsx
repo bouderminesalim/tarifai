@@ -227,13 +227,13 @@ function ClassificationWizard() {
       let bestTerm = '';
       for (const term of attempts) {
         const found = await api<Tariff[]>(`/api/tariffs?q=${encodeURIComponent(term)}`);
-        if (found.length >= 1 && found.length <= 12) { best = found; bestTerm = term; break; }
+        if (found.length >= 1 && found.length <= 20) { best = found; bestTerm = term; break; }
         if (found.length > 0 && (!best || found.length < best.length)) { best = found; bestTerm = term; }
       }
 
       if (!best || best.length === 0) {
         setError('Aucun code trouvé pour cette description. Essayez des mots plus généraux (matière, fonction principale).');
-      } else if (best.length > 12) {
+      } else if (best.length > 20) {
         setError(`${best.length} résultats pour « ${bestTerm} » — trop pour comparer précisément. Précisez avec la matière, la fonction ou un terme plus spécifique.`);
       } else if (best.length === 1) {
         setCandidates(best);
